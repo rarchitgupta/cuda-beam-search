@@ -1,2 +1,26 @@
 spanish_audio
 env
+notes.md
+
+# Build directories
+build/
+**/build/
+*.o
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+
+# Output directories and files
+outputs/
+**/outputs/
+*.log
+*.out
+*.err
+*.pkl
+*.pt
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
