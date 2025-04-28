@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <vector>
+#include "whisper/beam_search/beam_config.h"
 
 namespace whisper {
 namespace decoder {
@@ -15,17 +16,10 @@ struct BeamState {
     int32_t max_length;
 };
 
-struct BeamSearchConfig {
-    int32_t num_beams = 5;
-    int32_t max_length = 448;
-    float length_penalty = 1.0f;  // Higher values favor longer sequences
-    bool early_stopping = true;
-};
-
 // Main decoder that implements beam search on GPU
 class BeamSearch {
 public:
-    BeamSearch(const BeamSearchConfig& config);
+    BeamSearch(const beam_search::BeamSearchConfig& config);
     ~BeamSearch();
 
     void Initialize();
@@ -36,7 +30,7 @@ public:
 
 private:
     BeamState beam_state_;
-    BeamSearchConfig config_;
+    beam_search::BeamSearchConfig config_;
     void* device_workspace_;
 };
 

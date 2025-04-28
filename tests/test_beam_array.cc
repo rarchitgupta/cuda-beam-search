@@ -36,7 +36,10 @@ void test_beam_array_batch() {
         tokens.push_back(Token(static_cast<float>(i), i * 2, i - 1));
     }
     
+    std::cout << "Attempting to add " << tokens.size() << " tokens to beam" << std::endl;
     int count = beam.AddTokens(tokens.data(), tokens.size());
+    std::cout << "AddTokens returned count: " << count << ", beam.Size(): " << beam.Size() << std::endl;
+    
     assert(count == 64);
     assert(beam.Size() == 64);
     

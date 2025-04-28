@@ -107,8 +107,18 @@ void testScoreAndPrune() {
     std::vector<Token> tokens;
     output_beam.CopyToHost(tokens);
     
-    for (size_t i = 1; i < tokens.size(); i++) {
-        assert(tokens[i-1].score >= tokens[i].score);
+    std::cout << "Checking token scores after pruning (should be in descending order):" << std::endl;
+    for (size_t i = 0; i < tokens.size(); i++) {
+        std::cout << "  Token[" << i << "]: score=" << tokens[i].score 
+                  << ", token_id=" << tokens[i].token_id << std::endl;
+        
+        if (i > 0) {
+            if (!(tokens[i-1].score >= tokens[i].score)) {
+                std::cout << "ERROR: tokens[" << (i-1) << "].score (" << tokens[i-1].score 
+                          << ") < tokens[" << i << "].score (" << tokens[i].score << ")" << std::endl;
+            }
+            assert(tokens[i-1].score >= tokens[i].score);
+        }
     }
     
     // Clean up
@@ -239,12 +249,50 @@ void testTopK() {
     std::cout << "Top-K test passed!" << std::endl;
 }
 
+void test_process_half_logits() {
+    BeamSearchWorkspace workspace(1024 * 1024);
+    LogitProcessor processor(&workspace, 1.0f, 0, 1.0f);
+    
+    // Small test case
+    const int batch_size = 1;
+    const int seq_len = 1;
+    const int vocab_size = 16;
+    const int total_size = batch_size * seq_len * vocab_size;
+    
+    // Allocate device memory for half precision values
+    void* d_half_logits = nullptr;
+    cudaMalloc(&d_half_logits, total_size * sizeof(short)); // half precision
+    
+    // Create test data (half precision values on host)
+    std::vector<short> h_half_logits(total_size);
+    for (int i = 0; i < total_size; i++) {
+        // Simple way to create half values for testing
+        // In real code, use proper half-precision conversion
+        h_half_logits[i] = static_cast<short>(i * 100);
+    }
+    
+    // Copy to device
+    cudaMemcpy(d_half_logits, h_half_logits.data(), total_size * sizeof(short), 
+               cudaMemcpyHostToDevice);
+    
+    // Process logits
+    bool success = processor.ProcessLogitsHalf(d_half_logits, batch_size, seq_len, vocab_size);
+    assert(success);
+    
+    // Verify successful processing (actual values checked in more detailed tests)
+    std::cout << "Half-precision logit processing test passed!" << std::endl;
+    
+    // Clean up
+    cudaFree(d_half_logits);
+}
+
 int main() {
     try {
         testBasicFunctionality();
         testScoreAndPrune();
         testTemperature();
         testTopK();
+        test_process_half_logits();
         
         std::cout << "All LogitProcessor tests passed!" << std::endl;
         return 0;
