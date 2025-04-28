@@ -6,42 +6,39 @@
 namespace whisper {
 namespace decoder {
 
-// Structure to hold beam state
+// State maintained during beam search decoding
 struct BeamState {
-    int32_t* tokens;        // Current token sequence
-    float* scores;          // Beam scores
-    int32_t* lengths;       // Sequence lengths
-    int32_t num_beams;      // Number of active beams
-    int32_t max_length;     // Maximum sequence length
+    int32_t* tokens;     // Current token sequences
+    float* scores;       // Beam scores
+    int32_t* lengths;
+    int32_t num_beams;
+    int32_t max_length;
 };
 
-// Configuration for beam search
 struct BeamSearchConfig {
-    int32_t num_beams = 5;          // Number of beams to maintain
-    int32_t max_length = 448;       // Maximum sequence length
-    float length_penalty = 1.0f;    // Length penalty factor
-    bool early_stopping = true;     // Whether to stop when all beams reach EOS
+    int32_t num_beams = 5;
+    int32_t max_length = 448;
+    float length_penalty = 1.0f;  // Higher values favor longer sequences
+    bool early_stopping = true;
 };
 
+// Main decoder that implements beam search on GPU
 class BeamSearch {
 public:
     BeamSearch(const BeamSearchConfig& config);
     ~BeamSearch();
 
-    // Initialize beam search state
     void Initialize();
 
-    // Process logits for one step
     void ProcessStep(const float* logits, int32_t batch_size, int32_t vocab_size);
 
-    // Get the best token sequences
     void GetResults(std::vector<std::vector<int32_t>>& tokens);
 
 private:
     BeamState beam_state_;
     BeamSearchConfig config_;
-    void* device_workspace_;  // CUDA workspace memory
+    void* device_workspace_;
 };
 
 } // namespace decoder
-} // namespace whisper 
+} // namespace whisper

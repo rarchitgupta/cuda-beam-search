@@ -11,11 +11,11 @@ find_package(CUDA REQUIRED)
 # Set CUDA architecture
 set(CMAKE_CUDA_ARCHITECTURES 86)  # For RTX 4060 Ti
 
-# Find Python and pybind11
-find_package(Python 3.8 COMPONENTS Interpreter Development REQUIRED)
-find_package(pybind11 CONFIG)
+# Find Python
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
 
-# If pybind11 wasn't found through find_package, fetch it
+# Try to find pybind11, and if not found, fetch it
+find_package(pybind11 QUIET)
 if(NOT pybind11_FOUND)
     include(FetchContent)
     FetchContent_Declare(
@@ -24,13 +24,13 @@ if(NOT pybind11_FOUND)
         GIT_TAG v2.11.1
     )
     FetchContent_MakeAvailable(pybind11)
+    message(STATUS "pybind11 not found, fetched from GitHub")
 endif()
 
-# Add include directories
+# Include directories
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CUDA_INCLUDE_DIRS}
-    ${pybind11_INCLUDE_DIRS}
+    ${CUDA_INCLUDE_DIRS}  # Add CUDA include directories
 )
 
 # Add source files for the main library
@@ -54,6 +54,33 @@ target_link_libraries(whisper-cuda-decoder
 # Python module
 pybind11_add_module(cuda_beam_search src/whisper/beam_search/python_bindings.cc)
 target_link_libraries(cuda_beam_search PRIVATE whisper-cuda-decoder)
+
+# Set common output directory for all tests
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+# Tests
+enable_testing()
+
+# Gather all test source files
+file(GLOB TEST_SOURCES "tests/test_*.cc")
+
+# Create test targets
+foreach(test_source ${TEST_SOURCES})
+    get_filename_component(test_name ${test_source} NAME_WE)
+    add_executable(${test_name} ${test_source})
+    target_link_libraries(${test_name} whisper-cuda-decoder)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+    
+    # Add to ALL target so it's built with make
+    set_target_properties(${test_name} PROPERTIES EXCLUDE_FROM_ALL FALSE)
+endforeach()
+
+# Custom test target to run all tests
+add_custom_target(run_all_tests
+    COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+    DEPENDS ${TEST_TARGETS}
+    COMMENT "Running all tests"
+)
 
 # Install targets
 install(TARGETS whisper-cuda-decoder

@@ -17,7 +17,6 @@ TensorBridge::~TensorBridge() {
 }
 
 bool TensorBridge::set_logits(float* data, int batch_size, int seq_len, int vocab_size) {
-    // Store tensor information
     device_data_ = data;
     batch_size_ = batch_size;
     seq_len_ = seq_len;

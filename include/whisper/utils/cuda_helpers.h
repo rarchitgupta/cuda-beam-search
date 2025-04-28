@@ -7,7 +7,7 @@
 namespace whisper {
 namespace utils {
 
-// CUDA error checking macro
+// Error checking macro for CUDA calls with source location
 #define CUDA_CHECK(call) \
     do { \
         cudaError_t error = call; \
@@ -19,19 +19,16 @@ namespace utils {
         } \
     } while(0)
 
-// Memory management class
+// Memory pool to avoid frequent GPU memory allocations
 class GPUMemoryPool {
 public:
     GPUMemoryPool(size_t initial_size = 0);
     ~GPUMemoryPool();
 
-    // Allocate memory on GPU
     void* Allocate(size_t size);
 
-    // Free memory on GPU
     void Free(void* ptr);
 
-    // Preallocate a pool of memory
     void Preallocate(size_t size);
 
 private:
@@ -41,4 +38,4 @@ private:
 };
 
 } // namespace utils
-} // namespace whisper 
+} // namespace whisper
