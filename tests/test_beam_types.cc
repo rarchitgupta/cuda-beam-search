@@ -12,13 +12,13 @@ void test_token() {
     
     // Check default values
     assert(t1.score == 0.0f);
-    assert(t1.token_id == 0);
-    assert(t1.prev_index == -1);
+    assert(t1.tokenId == 0);
+    assert(t1.prevIndex == -1);
     
     // Check custom values
     assert(t2.score == 1.5f);
-    assert(t2.token_id == 42);
-    assert(t2.prev_index == 10);
+    assert(t2.tokenId == 42);
+    assert(t2.prevIndex == 10);
     
     std::cout << "Token tests passed!" << std::endl;
 }
@@ -28,20 +28,20 @@ void test_workspace() {
     BeamSearchWorkspace workspace(1024); // Small initial size for testing
     
     // Allocate memory
-    int* d_first = static_cast<int*>(workspace.Allocate(256));
-    float* d_second = static_cast<float*>(workspace.Allocate(512));
+    int* d_first = static_cast<int*>(workspace.allocate(256));
+    float* d_second = static_cast<float*>(workspace.allocate(512));
     
     // Check memory usage
-    assert(workspace.GetUsedSize() >= 768);
-    assert(workspace.GetUsedSize() <= 1024);
+    assert(workspace.usedSize() >= 768);
+    assert(workspace.usedSize() <= 1024);
     
     // Test workspace growth
-    char* d_large = static_cast<char*>(workspace.Allocate(2048));
-    assert(workspace.GetCapacity() >= 3072);
+    char* d_large = static_cast<char*>(workspace.allocate(2048));
+    assert(workspace.capacity() >= 3072);
     
     // Reset and check
-    workspace.Reset();
-    assert(workspace.GetUsedSize() == 0);
+    workspace.reset();
+    assert(workspace.usedSize() == 0);
     
     std::cout << "Workspace tests passed!" << std::endl;
 }

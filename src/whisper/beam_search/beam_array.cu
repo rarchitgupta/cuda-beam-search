@@ -1,5 +1,5 @@
 #include "whisper/beam_search/beam_array.h"
-#include <cuda_runtime.h>
+#include "whisper/beam_search/cuda_utils.h"  // For CUDA_CHECK and LAUNCH_AND_CHECK macros
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
@@ -10,7 +10,7 @@ namespace whisper {
 namespace beam_search {
 
 // CUDA kernel for generating indices for sorting
-__global__ void GenerateIndicesKernel(int* indices, size_t size) {
+__global__ void generate_indices_kernel(int* indices, size_t size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         indices[idx] = idx;
@@ -18,7 +18,7 @@ __global__ void GenerateIndicesKernel(int* indices, size_t size) {
 }
 
 // CUDA kernel for batched token addition
-__global__ void AddTokensKernel(float* d_scores, int* d_token_ids, int* d_prev_indices, 
+__global__ void add_tokens_kernel(float* d_scores, int* d_token_ids, int* d_prev_indices, 
                                const float* new_scores, const int* new_token_ids, const int* new_prev_indices,
                                size_t start_idx, size_t count) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -30,7 +30,7 @@ __global__ void AddTokensKernel(float* d_scores, int* d_token_ids, int* d_prev_i
 }
 
 // CUDA kernel for reordering data based on sorted indices
-__global__ void ReorderDataKernel(float* d_sorted_scores, int* d_sorted_token_ids, int* d_sorted_prev_indices,
+__global__ void reorder_data_kernel(float* d_sorted_scores, int* d_sorted_token_ids, int* d_sorted_prev_indices,
                                  const float* d_scores, const int* d_token_ids, const int* d_prev_indices,
                                  const int* d_indices, size_t size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -56,111 +56,120 @@ struct TokenScoreComparator {
 constexpr int kBlockSize = 256;
 constexpr size_t kAlignment = 128; // Align to 128 bytes for optimal memory access
 
-BeamArray::BeamArray(size_t max_beam_size, BeamSearchWorkspace* workspace)
-    : capacity_(max_beam_size), workspace_(workspace) {
+BeamArray::BeamArray(std::size_t maxBeamSize, BeamSearchWorkspace* workspace)
+    : capacity_(maxBeamSize), workspace_(workspace) {
     // Round up capacity to alignment boundary
     capacity_ = (capacity_ + kAlignment - 1) / kAlignment * kAlignment;
-    AllocateMemory();
-    Reset();
+    allocateMemory();
+    reset();
 }
 
 BeamArray::~BeamArray() {
     // Memory managed by workspace
 }
 
-void BeamArray::Reset() {
-    size_ = 0;
-    
-    h_scores_.clear();
-    h_token_ids_.clear();
-    h_prev_indices_.clear();
+// Add size() and capacity() implementations
+std::size_t BeamArray::size() const {
+    return size_;
 }
 
-void BeamArray::AllocateMemory() {
+std::size_t BeamArray::capacity() const {
+    return capacity_;
+}
+
+void BeamArray::reset() {
+    size_ = 0;
+    
+    hostScores_.clear();
+    hostTokenIds_.clear();
+    hostPrevIndices_.clear();
+}
+
+void BeamArray::allocateMemory() {
     size_t token_size = capacity_ * sizeof(float);
     size_t index_size = capacity_ * sizeof(int);
     
-    d_scores_ = static_cast<float*>(workspace_->Allocate(token_size, kAlignment));
-    d_token_ids_ = static_cast<int*>(workspace_->Allocate(index_size, kAlignment));
-    d_prev_indices_ = static_cast<int*>(workspace_->Allocate(index_size, kAlignment));
-    d_indices_ = static_cast<int*>(workspace_->Allocate(index_size, kAlignment));
+    deviceScores_ = static_cast<float*>(workspace_->allocate(token_size, kAlignment));
+    deviceTokenIds_ = static_cast<int*>(workspace_->allocate(index_size, kAlignment));
+    devicePrevIndices_ = static_cast<int*>(workspace_->allocate(index_size, kAlignment));
+    deviceIndices_ = static_cast<int*>(workspace_->allocate(index_size, kAlignment));
     
-    if (!d_scores_ || !d_token_ids_ || !d_prev_indices_ || !d_indices_) {
+    if (!deviceScores_ || !deviceTokenIds_ || !devicePrevIndices_ || !deviceIndices_) {
         throw std::runtime_error("Failed to allocate device memory for BeamArray");
     }
     
-    h_scores_.reserve(capacity_);
-    h_token_ids_.reserve(capacity_);
-    h_prev_indices_.reserve(capacity_);
+    hostScores_.reserve(capacity_);
+    hostTokenIds_.reserve(capacity_);
+    hostPrevIndices_.reserve(capacity_);
 }
 
-void BeamArray::EnsureCapacity(size_t required_size) {
-    if (required_size <= capacity_) {
+void BeamArray::ensureCapacity(std::size_t requiredSize) {
+    if (requiredSize <= capacity_) {
         return;
     }
     
-    size_t new_capacity = std::max(required_size, capacity_ * 2);
+    size_t new_capacity = std::max(requiredSize, capacity_ * 2);
     new_capacity = (new_capacity + kAlignment - 1) / kAlignment * kAlignment;
     
-    float* old_scores = d_scores_;
-    int* old_token_ids = d_token_ids_;
-    int* old_prev_indices = d_prev_indices_;
+    float* oldScores = deviceScores_;
+    int* oldTokenIds = deviceTokenIds_;
+    int* oldPrevIndices = devicePrevIndices_;
     
     size_t new_token_size = new_capacity * sizeof(float);
     size_t new_index_size = new_capacity * sizeof(int);
     
-    d_scores_ = static_cast<float*>(workspace_->Allocate(new_token_size, kAlignment));
-    d_token_ids_ = static_cast<int*>(workspace_->Allocate(new_index_size, kAlignment));
-    d_prev_indices_ = static_cast<int*>(workspace_->Allocate(new_index_size, kAlignment));
-    d_indices_ = static_cast<int*>(workspace_->Allocate(new_index_size, kAlignment));
+    deviceScores_ = static_cast<float*>(workspace_->allocate(new_token_size, kAlignment));
+    deviceTokenIds_ = static_cast<int*>(workspace_->allocate(new_index_size, kAlignment));
+    devicePrevIndices_ = static_cast<int*>(workspace_->allocate(new_index_size, kAlignment));
+    deviceIndices_ = static_cast<int*>(workspace_->allocate(new_index_size, kAlignment));
     
-    if (!d_scores_ || !d_token_ids_ || !d_prev_indices_ || !d_indices_) {
+    if (!deviceScores_ || !deviceTokenIds_ || !devicePrevIndices_ || !deviceIndices_) {
         throw std::runtime_error("Failed to reallocate device memory for BeamArray");
     }
     
     // Copy old data to new memory
     if (size_ > 0) {
-        cudaMemcpy(d_scores_, old_scores, size_ * sizeof(float), cudaMemcpyDeviceToDevice);
-        cudaMemcpy(d_token_ids_, old_token_ids, size_ * sizeof(int), cudaMemcpyDeviceToDevice);
-        cudaMemcpy(d_prev_indices_, old_prev_indices, size_ * sizeof(int), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMemcpy(deviceScores_, oldScores, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(deviceTokenIds_, oldTokenIds, size_ * sizeof(int), cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(devicePrevIndices_, oldPrevIndices, size_ * sizeof(int), cudaMemcpyDeviceToDevice));
     }
     
     capacity_ = new_capacity;
     
-    h_scores_.reserve(capacity_);
-    h_token_ids_.reserve(capacity_);
-    h_prev_indices_.reserve(capacity_);
+    hostScores_.reserve(capacity_);
+    hostTokenIds_.reserve(capacity_);
+    hostPrevIndices_.reserve(capacity_);
 }
 
-int BeamArray::AddToken(const Token& token) {
+int BeamArray::addToken(const Token& token) {
     if (size_ >= capacity_) {
         // Try to increase capacity
-        EnsureCapacity(size_ + 1);
+        ensureCapacity(size_ + 1);
         if (size_ >= capacity_) {
             return -1;  // Failed to increase capacity
         }
     }
     
     // Copy token to device memory
-    cudaMemcpy(d_scores_ + size_, &token.score, sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_token_ids_ + size_, &token.token_id, sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_prev_indices_ + size_, &token.prev_index, sizeof(int), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(deviceScores_ + size_, &token.score, sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceTokenIds_ + size_, &token.tokenId, sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(devicePrevIndices_ + size_, &token.prevIndex, sizeof(int), cudaMemcpyHostToDevice));
     
     // Add to host shadow copies for quick access
-    h_scores_.push_back(token.score);
-    h_token_ids_.push_back(token.token_id);
-    h_prev_indices_.push_back(token.prev_index);
+    hostScores_.push_back(token.score);
+    hostTokenIds_.push_back(token.tokenId);
+    hostPrevIndices_.push_back(token.prevIndex);
     
     return size_++;
 }
 
-int BeamArray::AddTokens(const Token* tokens, size_t count) {
+int BeamArray::addTokens(const Token* tokens, std::size_t count) {
     if (count == 0) {
         return 0;
     }
     
     if (size_ + count > capacity_) {
-        EnsureCapacity(size_ + count);
+        ensureCapacity(size_ + count);
         if (size_ + count > capacity_) {
             count = capacity_ - size_;  // Truncate to available space
             if (count == 0) {
@@ -169,157 +178,163 @@ int BeamArray::AddTokens(const Token* tokens, size_t count) {
         }
     }
     
-    std::vector<float> new_scores(count);
-    std::vector<int> new_token_ids(count);
-    std::vector<int> new_prev_indices(count);
+    std::vector<float> newScores(count);
+    std::vector<int> newTokenIds(count);
+    std::vector<int> newPrevIndices(count);
     
-    for (size_t i = 0; i < count; i++) {
-        new_scores[i] = tokens[i].score;
-        new_token_ids[i] = tokens[i].token_id;
-        new_prev_indices[i] = tokens[i].prev_index;
+    for (std::size_t i = 0; i < count; i++) {
+        newScores[i] = tokens[i].score;
+        newTokenIds[i] = tokens[i].tokenId;
+        newPrevIndices[i] = tokens[i].prevIndex;
         
-        h_scores_.push_back(tokens[i].score);
-        h_token_ids_.push_back(tokens[i].token_id);
-        h_prev_indices_.push_back(tokens[i].prev_index);
+        hostScores_.push_back(tokens[i].score);
+        hostTokenIds_.push_back(tokens[i].tokenId);
+        hostPrevIndices_.push_back(tokens[i].prevIndex);
     }
     
-    float* d_new_scores;
-    int* d_new_token_ids;
-    int* d_new_prev_indices;
+    float* deviceNewScores;
+    int* deviceNewTokenIds;
+    int* deviceNewPrevIndices;
     
-    cudaMalloc(&d_new_scores, count * sizeof(float));
-    cudaMalloc(&d_new_token_ids, count * sizeof(int));
-    cudaMalloc(&d_new_prev_indices, count * sizeof(int));
+    CUDA_CHECK(cudaMalloc(&deviceNewScores, count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&deviceNewTokenIds, count * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&deviceNewPrevIndices, count * sizeof(int)));
     
-    cudaMemcpy(d_new_scores, new_scores.data(), count * sizeof(float), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_new_token_ids, new_token_ids.data(), count * sizeof(int), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_new_prev_indices, new_prev_indices.data(), count * sizeof(int), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(deviceNewScores, newScores.data(), count * sizeof(float), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceNewTokenIds, newTokenIds.data(), count * sizeof(int), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceNewPrevIndices, newPrevIndices.data(), count * sizeof(int), cudaMemcpyHostToDevice));
     
     // Launch kernel to add tokens in parallel
     int blocks = (count + kBlockSize - 1) / kBlockSize;
-    AddTokensKernel<<<blocks, kBlockSize>>>(d_scores_, d_token_ids_, d_prev_indices_,
-                                           d_new_scores, d_new_token_ids, d_new_prev_indices,
-                                           size_, count);
+    LAUNCH_AND_CHECK(add_tokens_kernel<<<blocks, kBlockSize>>>(
+        deviceScores_, deviceTokenIds_, devicePrevIndices_,
+        deviceNewScores, deviceNewTokenIds, deviceNewPrevIndices,
+        size_, count
+    ));
     
-    cudaFree(d_new_scores);
-    cudaFree(d_new_token_ids);
-    cudaFree(d_new_prev_indices);
+    CUDA_CHECK(cudaFree(deviceNewScores));
+    CUDA_CHECK(cudaFree(deviceNewTokenIds));
+    CUDA_CHECK(cudaFree(deviceNewPrevIndices));
     
     size_ += count;
     return count;
 }
 
-void BeamArray::SortByScore() {
+void BeamArray::sortByScore() {
     if (size_ <= 1) {
         return;  // Nothing to sort
     }
     
     // Generate indices for sorting
     int blocks = (size_ + kBlockSize - 1) / kBlockSize;
-    GenerateIndicesKernel<<<blocks, kBlockSize>>>(d_indices_, size_);
+    LAUNCH_AND_CHECK(generate_indices_kernel<<<blocks, kBlockSize>>>(
+        deviceIndices_, size_
+    ));
     
     // Sort indices based on scores (descending order)
-    thrust::device_ptr<int> d_indices_ptr(d_indices_);
-    thrust::sort(thrust::device, d_indices_ptr, d_indices_ptr + size_, 
-                TokenScoreComparator(d_scores_));
+    thrust::device_ptr<int> deviceIndicesPtr(deviceIndices_);
+    thrust::sort(thrust::device, deviceIndicesPtr, deviceIndicesPtr + size_, 
+                TokenScoreComparator(deviceScores_));
     
     // Allocate temporary memory for sorted data
-    float* d_sorted_scores;
-    int* d_sorted_token_ids;
-    int* d_sorted_prev_indices;
+    float* sortedScores;
+    int* sortedTokenIds;
+    int* sortedPrevIndices;
     
-    cudaMalloc(&d_sorted_scores, size_ * sizeof(float));
-    cudaMalloc(&d_sorted_token_ids, size_ * sizeof(int));
-    cudaMalloc(&d_sorted_prev_indices, size_ * sizeof(int));
+    CUDA_CHECK(cudaMalloc(&sortedScores, size_ * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&sortedTokenIds, size_ * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&sortedPrevIndices, size_ * sizeof(int)));
     
     // Reorder data in parallel based on sorted indices
-    ReorderDataKernel<<<blocks, kBlockSize>>>(d_sorted_scores, d_sorted_token_ids, d_sorted_prev_indices,
-                                             d_scores_, d_token_ids_, d_prev_indices_,
-                                             d_indices_, size_);
+    LAUNCH_AND_CHECK(reorder_data_kernel<<<blocks, kBlockSize>>>(
+        sortedScores, sortedTokenIds, sortedPrevIndices,
+        deviceScores_, deviceTokenIds_, devicePrevIndices_,
+        deviceIndices_, size_
+    ));
     
     // Copy sorted data back
-    cudaMemcpy(d_scores_, d_sorted_scores, size_ * sizeof(float), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(d_token_ids_, d_sorted_token_ids, size_ * sizeof(int), cudaMemcpyDeviceToDevice);
-    cudaMemcpy(d_prev_indices_, d_sorted_prev_indices, size_ * sizeof(int), cudaMemcpyDeviceToDevice);
+    CUDA_CHECK(cudaMemcpy(deviceScores_, sortedScores, size_ * sizeof(float), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(deviceTokenIds_, sortedTokenIds, size_ * sizeof(int), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(devicePrevIndices_, sortedPrevIndices, size_ * sizeof(int), cudaMemcpyDeviceToDevice));
     
-    cudaFree(d_sorted_scores);
-    cudaFree(d_sorted_token_ids);
-    cudaFree(d_sorted_prev_indices);
+    CUDA_CHECK(cudaFree(sortedScores));
+    CUDA_CHECK(cudaFree(sortedTokenIds));
+    CUDA_CHECK(cudaFree(sortedPrevIndices));
     
     // Update host shadow copies
-    CopyToHost(h_scores_, h_token_ids_, h_prev_indices_);
+    copyToHost(hostScores_, hostTokenIds_, hostPrevIndices_);
 }
 
-void BeamArray::Prune(size_t beam_width) {
-    if (size_ <= beam_width) {
+void BeamArray::prune(std::size_t beamWidth) {
+    if (size_ <= beamWidth) {
         return;  // No pruning needed
     }
     
     // Sort first to ensure we keep the best tokens
-    SortByScore();
+    sortByScore();
     
     // Truncate to beam width
-    size_ = beam_width;
+    size_ = beamWidth;
     
     // Truncate host shadow copies
-    h_scores_.resize(size_);
-    h_token_ids_.resize(size_);
-    h_prev_indices_.resize(size_);
+    hostScores_.resize(size_);
+    hostTokenIds_.resize(size_);
+    hostPrevIndices_.resize(size_);
 }
 
-Token BeamArray::GetToken(size_t index) const {
+Token BeamArray::getToken(std::size_t index) const {
     if (index >= size_) {
         throw std::out_of_range("Token index out of range");
     }
     
     // Use host shadow copies for fast access if available
-    if (index < h_scores_.size()) {
-        return Token(h_scores_[index], h_token_ids_[index], h_prev_indices_[index]);
+    if (index < hostScores_.size()) {
+        return Token(hostScores_[index], hostTokenIds_[index], hostPrevIndices_[index]);
     }
     
     // Otherwise, fetch from device
     Token token;
-    cudaMemcpy(&token.score, d_scores_ + index, sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&token.token_id, d_token_ids_ + index, sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(&token.prev_index, d_prev_indices_ + index, sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(&token.score, deviceScores_ + index, sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&token.tokenId, deviceTokenIds_ + index, sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(&token.prevIndex, devicePrevIndices_ + index, sizeof(int), cudaMemcpyDeviceToHost));
     
     return token;
 }
 
-void BeamArray::CopyToHost(std::vector<Token>& host_tokens) const {
-    host_tokens.resize(size_);
+void BeamArray::copyToHost(std::vector<Token>& hostTokens) const {
+    hostTokens.resize(size_);
     
     if (size_ == 0) {
         return;
     }
     
     std::vector<float> scores(size_);
-    std::vector<int> token_ids(size_);
-    std::vector<int> prev_indices(size_);
+    std::vector<int> tokenIds(size_);
+    std::vector<int> prevIndices(size_);
     
     // Copy from device to host
-    cudaMemcpy(scores.data(), d_scores_, size_ * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(token_ids.data(), d_token_ids_, size_ * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(prev_indices.data(), d_prev_indices_, size_ * sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(scores.data(), deviceScores_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(tokenIds.data(), deviceTokenIds_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(prevIndices.data(), devicePrevIndices_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
     
     // Construct tokens
-    for (size_t i = 0; i < size_; i++) {
-        host_tokens[i] = Token(scores[i], token_ids[i], prev_indices[i]);
+    for (std::size_t i = 0; i < size_; i++) {
+        hostTokens[i] = Token(scores[i], tokenIds[i], prevIndices[i]);
     }
 }
 
-void BeamArray::CopyToHost(std::vector<float>& scores, std::vector<int>& token_ids, std::vector<int>& prev_indices) {
+void BeamArray::copyToHost(std::vector<float>& scores, std::vector<int>& tokenIds, std::vector<int>& prevIndices) {
     scores.resize(size_);
-    token_ids.resize(size_);
-    prev_indices.resize(size_);
+    tokenIds.resize(size_);
+    prevIndices.resize(size_);
     
     if (size_ == 0) {
         return;
     }
     
-    cudaMemcpy(scores.data(), d_scores_, size_ * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(token_ids.data(), d_token_ids_, size_ * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(prev_indices.data(), d_prev_indices_, size_ * sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(scores.data(), deviceScores_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(tokenIds.data(), deviceTokenIds_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(prevIndices.data(), devicePrevIndices_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
 }
 
 } // namespace beam_search

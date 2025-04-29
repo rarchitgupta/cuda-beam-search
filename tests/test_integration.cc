@@ -48,39 +48,39 @@ void testFullBeamSearchPipeline() {
     cudaMemcpy(d_logits, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     // 5. Set logits in tensor bridge
-    tensor_bridge.set_logits(d_logits, batch_size, seq_len, vocab_size);
+    tensor_bridge.setLogits(d_logits, batch_size, seq_len, vocab_size);
     
     // 6. Create logit processor
     LogitProcessor processor(&workspace, temperature, top_k);
     
     // 7. Process logits
-    processor.ProcessLogits(d_logits, batch_size, seq_len, vocab_size);
+    processor.processLogits(d_logits, batch_size, seq_len, vocab_size);
     
     // 8. Create initial beam arrays for each batch
     BeamArray initial_beam_1(beam_width, &workspace);
     BeamArray initial_beam_2(beam_width, &workspace);
     
     // Add start token to each beam
-    initial_beam_1.AddToken(Token(0.0f, 0, -1));
-    initial_beam_2.AddToken(Token(0.0f, 0, -1));
+    initial_beam_1.addToken(Token(0.0f, 0, -1));
+    initial_beam_2.addToken(Token(0.0f, 0, -1));
     
     // 9. Create output beam arrays
     BeamArray output_beam_1(beam_width * vocab_size, &workspace);
     BeamArray output_beam_2(beam_width * vocab_size, &workspace);
     
     // 10. Process first position in sequence
-    processor.ScoreAndPrune(&initial_beam_1, 0, 0, &output_beam_1, beam_width);
-    processor.ScoreAndPrune(&initial_beam_2, 1, 0, &output_beam_2, beam_width);
+    processor.scoreAndPrune(&initial_beam_1, 0, 0, &output_beam_1, beam_width);
+    processor.scoreAndPrune(&initial_beam_2, 1, 0, &output_beam_2, beam_width);
     
     // 11. Verify output beams
-    assert(output_beam_1.Size() == beam_width);
-    assert(output_beam_2.Size() == beam_width);
+    assert(output_beam_1.size() == beam_width);
+    assert(output_beam_2.size() == beam_width);
     
     // 12. Get tokens from beams
     std::vector<Token> tokens_1;
     std::vector<Token> tokens_2;
-    output_beam_1.CopyToHost(tokens_1);
-    output_beam_2.CopyToHost(tokens_2);
+    output_beam_1.copyToHost(tokens_1);
+    output_beam_2.copyToHost(tokens_2);
     
     // 13. Verify tokens are sorted by score
     for (size_t i = 1; i < tokens_1.size(); i++) {
@@ -92,45 +92,45 @@ void testFullBeamSearchPipeline() {
     
     // 14. Process second position in sequence
     BeamArray next_beam_1(beam_width * vocab_size, &workspace);
-    processor.ScoreAndPrune(&output_beam_1, 0, 1, &next_beam_1, beam_width);
+    processor.scoreAndPrune(&output_beam_1, 0, 1, &next_beam_1, beam_width);
     
     BeamArray next_beam_2(beam_width * vocab_size, &workspace);
-    processor.ScoreAndPrune(&output_beam_2, 1, 1, &next_beam_2, beam_width);
+    processor.scoreAndPrune(&output_beam_2, 1, 1, &next_beam_2, beam_width);
     
     // 15. Verify next beams
-    assert(next_beam_1.Size() == beam_width);
-    assert(next_beam_2.Size() == beam_width);
+    assert(next_beam_1.size() == beam_width);
+    assert(next_beam_2.size() == beam_width);
     
     // 16. Repeat for third position
     BeamArray final_beam_1(beam_width * vocab_size, &workspace);
-    processor.ScoreAndPrune(&next_beam_1, 0, 2, &final_beam_1, beam_width);
+    processor.scoreAndPrune(&next_beam_1, 0, 2, &final_beam_1, beam_width);
     
     BeamArray final_beam_2(beam_width * vocab_size, &workspace);
-    processor.ScoreAndPrune(&next_beam_2, 1, 2, &final_beam_2, beam_width);
+    processor.scoreAndPrune(&next_beam_2, 1, 2, &final_beam_2, beam_width);
     
     // 17. Verify final beams
-    assert(final_beam_1.Size() == beam_width);
-    assert(final_beam_2.Size() == beam_width);
+    assert(final_beam_1.size() == beam_width);
+    assert(final_beam_2.size() == beam_width);
     
     // 18. Get best hypothesis from each batch
-    Token best_token_1 = final_beam_1.GetToken(0);
-    Token best_token_2 = final_beam_2.GetToken(0);
+    Token best_token_1 = final_beam_1.getToken(0);
+    Token best_token_2 = final_beam_2.getToken(0);
     
     // 19. Verify we can trace back through the token history
     std::vector<int> sequence_1, sequence_2;
     
     // Reconstruct sequence 1
     Token current = best_token_1;
-    while (current.prev_index >= 0) {
-        sequence_1.push_back(current.token_id);
+    while (current.prevIndex >= 0) {
+        sequence_1.push_back(current.tokenId);
         
         // Get previous token based on prev_index
-        if (current.prev_index >= 0) {
+        if (current.prevIndex >= 0) {
             // Find which beam this token came from
             if (sequence_1.size() == 1) {
-                current = next_beam_1.GetToken(current.prev_index);
+                current = next_beam_1.getToken(current.prevIndex);
             } else if (sequence_1.size() == 2) {
-                current = output_beam_1.GetToken(current.prev_index);
+                current = output_beam_1.getToken(current.prevIndex);
             } else {
                 break;
             }
@@ -139,16 +139,16 @@ void testFullBeamSearchPipeline() {
     
     // Reconstruct sequence 2
     current = best_token_2;
-    while (current.prev_index >= 0) {
-        sequence_2.push_back(current.token_id);
+    while (current.prevIndex >= 0) {
+        sequence_2.push_back(current.tokenId);
         
         // Get previous token based on prev_index
-        if (current.prev_index >= 0) {
+        if (current.prevIndex >= 0) {
             // Find which beam this token came from
             if (sequence_2.size() == 1) {
-                current = next_beam_2.GetToken(current.prev_index);
+                current = next_beam_2.getToken(current.prevIndex);
             } else if (sequence_2.size() == 2) {
-                current = output_beam_2.GetToken(current.prev_index);
+                current = output_beam_2.getToken(current.prevIndex);
             } else {
                 break;
             }

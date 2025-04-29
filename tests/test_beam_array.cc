@@ -11,18 +11,18 @@ void test_beam_array_basic() {
     BeamSearchWorkspace workspace(1024 * 1024);
     BeamArray beam(128, &workspace);
     
-    assert(beam.Size() == 0);
-    assert(beam.Capacity() >= 128);
+    assert(beam.size() == 0);
+    assert(beam.capacity() >= 128);
     
     Token t1(1.5f, 42, 10);
-    int idx = beam.AddToken(t1);
+    int idx = beam.addToken(t1);
     assert(idx == 0);
-    assert(beam.Size() == 1);
+    assert(beam.size() == 1);
     
-    Token t2 = beam.GetToken(0);
+    Token t2 = beam.getToken(0);
     assert(t2.score == 1.5f);
-    assert(t2.token_id == 42);
-    assert(t2.prev_index == 10);
+    assert(t2.tokenId == 42);
+    assert(t2.prevIndex == 10);
     
     std::cout << "Basic BeamArray tests passed!" << std::endl;
 }
@@ -36,15 +36,15 @@ void test_beam_array_batch() {
         tokens.push_back(Token(static_cast<float>(i), i * 2, i - 1));
     }
     
-    int count = beam.AddTokens(tokens.data(), tokens.size());
+    int count = beam.addTokens(tokens.data(), tokens.size());
     assert(count == 64);
-    assert(beam.Size() == 64);
+    assert(beam.size() == 64);
     
     for (int i = 0; i < 64; i++) {
-        Token t = beam.GetToken(i);
+        Token t = beam.getToken(i);
         assert(t.score == static_cast<float>(i));
-        assert(t.token_id == i * 2);
-        assert(t.prev_index == i - 1);
+        assert(t.tokenId == i * 2);
+        assert(t.prevIndex == i - 1);
     }
     
     std::cout << "Batch token addition tests passed!" << std::endl;
@@ -66,24 +66,24 @@ void test_beam_array_sort_prune() {
         tokens.push_back(Token(score, i, i - 1));
     }
     
-    beam.AddTokens(tokens.data(), tokens.size());
-    assert(beam.Size() == 100);
+    beam.addTokens(tokens.data(), tokens.size());
+    assert(beam.size() == 100);
     
-    beam.SortByScore();
+    beam.sortByScore();
     
-    Token prev = beam.GetToken(0);
+    Token prev = beam.getToken(0);
     for (int i = 1; i < 100; i++) {
-        Token current = beam.GetToken(i);
+        Token current = beam.getToken(i);
         assert(prev.score >= current.score);
         prev = current;
     }
     
-    beam.Prune(10);
-    assert(beam.Size() == 10);
+    beam.prune(10);
+    assert(beam.size() == 10);
     
     std::sort(scores.begin(), scores.end(), std::greater<float>());
     for (int i = 0; i < 10; i++) {
-        Token t = beam.GetToken(i);
+        Token t = beam.getToken(i);
         assert(t.score == scores[i]);
     }
     
@@ -95,17 +95,17 @@ void test_beam_array_copy_to_host() {
     BeamArray beam(128, &workspace);
     
     for (int i = 0; i < 50; i++) {
-        beam.AddToken(Token(static_cast<float>(i), i, i - 1));
+        beam.addToken(Token(static_cast<float>(i), i, i - 1));
     }
     
     std::vector<Token> host_tokens;
-    beam.CopyToHost(host_tokens);
+    beam.copyToHost(host_tokens);
     
     assert(host_tokens.size() == 50);
     for (int i = 0; i < 50; i++) {
         assert(host_tokens[i].score == static_cast<float>(i));
-        assert(host_tokens[i].token_id == i);
-        assert(host_tokens[i].prev_index == i - 1);
+        assert(host_tokens[i].tokenId == i);
+        assert(host_tokens[i].prevIndex == i - 1);
     }
     
     std::cout << "Copy to host tests passed!" << std::endl;
@@ -115,17 +115,17 @@ void test_beam_array_capacity() {
     BeamSearchWorkspace workspace(1024 * 1024);
     BeamArray beam(10, &workspace);
     
-    assert(beam.Capacity() >= 10);
+    assert(beam.capacity() >= 10);
     
     std::vector<Token> tokens(20);
     for (int i = 0; i < 20; i++) {
         tokens[i] = Token(static_cast<float>(i), i, i - 1);
     }
     
-    int count = beam.AddTokens(tokens.data(), tokens.size());
+    int count = beam.addTokens(tokens.data(), tokens.size());
     assert(count == 20);
-    assert(beam.Size() == 20);
-    assert(beam.Capacity() >= 20);
+    assert(beam.size() == 20);
+    assert(beam.capacity() >= 20);
     
     std::cout << "Capacity growth tests passed!" << std::endl;
 }

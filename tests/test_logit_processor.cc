@@ -43,21 +43,21 @@ void testBasicFunctionality() {
     cudaMemcpy(d_logits, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     // Process logits
-    bool success = processor.ProcessLogits(d_logits, batch_size, seq_len, vocab_size);
+    bool success = processor.processLogits(d_logits, batch_size, seq_len, vocab_size);
     assert(success);
     
     // Create beam with start token
     BeamArray beam(1024, &workspace);
-    beam.AddToken(Token(0.0f, 0, -1));
+    beam.addToken(Token(0.0f, 0, -1));
     
     // Create output beam
     BeamArray output_beam(1024, &workspace);
     
     // Score tokens
-    processor.ScoreNextTokens(&beam, 0, 0, &output_beam);
+    processor.scoreNextTokens(&beam, 0, 0, &output_beam);
     
     // Verify output beam size (should be vocab_size)
-    assert(output_beam.Size() == vocab_size);
+    assert(output_beam.size() == vocab_size);
     
     // Clean up
     cudaFree(d_logits);
@@ -88,24 +88,24 @@ void testScoreAndPrune() {
     cudaMemcpy(d_logits, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     // Process logits
-    processor.ProcessLogits(d_logits, batch_size, seq_len, vocab_size);
+    processor.processLogits(d_logits, batch_size, seq_len, vocab_size);
     
     // Create beam with start token
     BeamArray beam(1024, &workspace);
-    beam.AddToken(Token(0.0f, 0, -1));
+    beam.addToken(Token(0.0f, 0, -1));
     
     // Create output beam
     BeamArray output_beam(1024, &workspace);
     
     // Score and prune
-    processor.ScoreAndPrune(&beam, 0, 0, &output_beam, beam_width);
+    processor.scoreAndPrune(&beam, 0, 0, &output_beam, beam_width);
     
     // Verify output beam size
-    assert(output_beam.Size() == beam_width);
+    assert(output_beam.size() == beam_width);
     
     // Verify tokens are sorted by score
     std::vector<Token> tokens;
-    output_beam.CopyToHost(tokens);
+    output_beam.copyToHost(tokens);
     
     for (size_t i = 1; i < tokens.size(); i++) {
         assert(tokens[i-1].score >= tokens[i].score);
@@ -146,26 +146,26 @@ void testTemperature() {
     cudaMemcpy(d_logits2, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     // Process logits
-    hot_processor.ProcessLogits(d_logits, batch_size, seq_len, vocab_size);
-    cold_processor.ProcessLogits(d_logits2, batch_size, seq_len, vocab_size);
+    hot_processor.processLogits(d_logits, batch_size, seq_len, vocab_size);
+    cold_processor.processLogits(d_logits2, batch_size, seq_len, vocab_size);
     
     // Create source beam
     BeamArray beam(1024, &workspace);
-    beam.AddToken(Token(0.0f, 0, -1));
+    beam.addToken(Token(0.0f, 0, -1));
     
     // Create output beams
     BeamArray hot_beam(1024, &workspace);
     BeamArray cold_beam(1024, &workspace);
     
     // Score and prune
-    hot_processor.ScoreAndPrune(&beam, 0, 0, &hot_beam, beam_width);
-    cold_processor.ScoreAndPrune(&beam, 0, 0, &cold_beam, beam_width);
+    hot_processor.scoreAndPrune(&beam, 0, 0, &hot_beam, beam_width);
+    cold_processor.scoreAndPrune(&beam, 0, 0, &cold_beam, beam_width);
     
     // Get tokens
     std::vector<Token> hot_tokens;
     std::vector<Token> cold_tokens;
-    hot_beam.CopyToHost(hot_tokens);
-    cold_beam.CopyToHost(cold_tokens);
+    hot_beam.copyToHost(hot_tokens);
+    cold_beam.copyToHost(cold_tokens);
     
     // Verify that cold beam has more extreme scores (larger difference between scores)
     float hot_score_diff = hot_tokens[0].score - hot_tokens[beam_width-1].score;
@@ -204,24 +204,24 @@ void testTopK() {
     cudaMemcpy(d_logits, h_logits.data(), h_logits.size() * sizeof(float), cudaMemcpyHostToDevice);
     
     // Process logits
-    processor.ProcessLogits(d_logits, batch_size, seq_len, vocab_size);
+    processor.processLogits(d_logits, batch_size, seq_len, vocab_size);
     
     // Create beam with start token
     BeamArray beam(1024, &workspace);
-    beam.AddToken(Token(0.0f, 0, -1));
+    beam.addToken(Token(0.0f, 0, -1));
     
     // Create output beam
     BeamArray output_beam(1024, &workspace);
     
     // Score tokens
-    processor.ScoreNextTokens(&beam, 0, 0, &output_beam);
+    processor.scoreNextTokens(&beam, 0, 0, &output_beam);
     
     // Sort output beam
-    output_beam.SortByScore();
+    output_beam.sortByScore();
     
     // Get tokens
     std::vector<Token> tokens;
-    output_beam.CopyToHost(tokens);
+    output_beam.copyToHost(tokens);
     
     // Count non-negative infinity scores (should be top_k)
     int valid_count = 0;

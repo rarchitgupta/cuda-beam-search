@@ -1,30 +1,39 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
 namespace whisper {
 namespace beam_search {
 
-// Interface for passing PyTorch/TensorFlow tensors to CUDA beam search
+// Interface for passing framework logits tensors to CUDA beam search.
 class TensorBridge {
 public:
+    // Constructs an empty TensorBridge.
     TensorBridge();
+
+    // Destroys the TensorBridge; does not free tensor memory.
     ~TensorBridge();
 
-    // Associate logits tensor from ML framework (doesn't take ownership)
-    bool set_logits(float* data, int batch_size, int seq_len, int vocab_size);
+    // Sets the logits buffer (raw device pointer) without taking ownership.
+    bool setLogits(float* deviceData,
+                   std::size_t batchSize,
+                   std::size_t seqLen,
+                   std::size_t vocabSize);
 
-    float* get_device_data() const;
+    // Returns the raw device pointer for the logits.
+    float* getDeviceData() const;
 
-    std::vector<int> get_shape() const;
+    // Returns the shape [batchSize, seqLen, vocabSize].
+    std::vector<std::size_t> getShape() const;
 
 private:
-    float* device_data_;
-    int batch_size_;
-    int seq_len_;
-    int vocab_size_;
-    bool owns_memory_;
+    float* deviceData_ = nullptr;
+    std::size_t batchSize_ = 0;
+    std::size_t seqLen_ = 0;
+    std::size_t vocabSize_ = 0;
+    bool ownsMemory_ = false;
 };
 
 } // namespace beam_search

@@ -44,29 +44,30 @@ PYBIND11_MODULE(cuda_beam_search, m) {
         .def(py::init<>())
         .def(py::init<float, int, int>())
         .def_readwrite("score", &whisper::beam_search::Token::score)
-        .def_readwrite("token_id", &whisper::beam_search::Token::token_id)
-        .def_readwrite("prev_index", &whisper::beam_search::Token::prev_index);
+        .def_readwrite("token_id", &whisper::beam_search::Token::tokenId)
+        .def_readwrite("prev_index", &whisper::beam_search::Token::prevIndex);
     
     // Bind BeamSearchWorkspace
     py::class_<whisper::beam_search::BeamSearchWorkspace>(m, "BeamSearchWorkspace")
         .def(py::init<size_t>(), py::arg("initial_size") = 16 * 1024 * 1024)
-        .def("reset", &whisper::beam_search::BeamSearchWorkspace::Reset)
-        .def("get_used_size", &whisper::beam_search::BeamSearchWorkspace::GetUsedSize)
-        .def("get_capacity", &whisper::beam_search::BeamSearchWorkspace::GetCapacity);
+        .def("reset", &whisper::beam_search::BeamSearchWorkspace::reset)
+        .def("get_used_size", &whisper::beam_search::BeamSearchWorkspace::usedSize)
+        .def("get_capacity", &whisper::beam_search::BeamSearchWorkspace::capacity);
     
     // Bind BeamArray
     py::class_<whisper::beam_search::BeamArray>(m, "BeamArray")
         .def(py::init<size_t, whisper::beam_search::BeamSearchWorkspace*>())
-        .def("reset", &whisper::beam_search::BeamArray::Reset)
-        .def("size", &whisper::beam_search::BeamArray::Size)
-        .def("capacity", &whisper::beam_search::BeamArray::Capacity)
-        .def("add_token", &whisper::beam_search::BeamArray::AddToken)
-        .def("sort_by_score", &whisper::beam_search::BeamArray::SortByScore)
-        .def("prune", &whisper::beam_search::BeamArray::Prune)
-        .def("get_token", &whisper::beam_search::BeamArray::GetToken)
+        .def("reset", &whisper::beam_search::BeamArray::reset)
+        .def("size", &whisper::beam_search::BeamArray::size)
+        .def("capacity", &whisper::beam_search::BeamArray::capacity)
+        .def("add_token", &whisper::beam_search::BeamArray::addToken)
+        .def("add_tokens", &whisper::beam_search::BeamArray::addTokens)
+        .def("sort_by_score", &whisper::beam_search::BeamArray::sortByScore)
+        .def("prune", &whisper::beam_search::BeamArray::prune)
+        .def("get_token", &whisper::beam_search::BeamArray::getToken)
         .def("copy_to_host", [](const whisper::beam_search::BeamArray& self) {
             std::vector<whisper::beam_search::Token> tokens;
-            self.CopyToHost(tokens);
+            self.copyToHost(tokens);
             return tokens;
         });
     
@@ -83,15 +84,15 @@ PYBIND11_MODULE(cuda_beam_search, m) {
                 throw std::runtime_error("Logits tensor must have 3 dimensions [batch_size, seq_len, vocab_size]");
             }
             
-            int batch_size = shape[0];
-            int seq_len = shape[1];
-            int vocab_size = shape[2];
+            std::size_t batch_size = shape[0];
+            std::size_t seq_len = shape[1];
+            std::size_t vocab_size = shape[2];
             
             float* data_ptr = static_cast<float*>(get_tensor_data_ptr(tensor));
             
-            return self.set_logits(data_ptr, batch_size, seq_len, vocab_size);
+            return self.setLogits(data_ptr, batch_size, seq_len, vocab_size);
         })
-        .def("get_shape", &whisper::beam_search::TensorBridge::get_shape);
+        .def("get_shape", &whisper::beam_search::TensorBridge::getShape);
     
     // Bind LogitProcessor
     py::class_<whisper::beam_search::LogitProcessor>(m, "LogitProcessor")
@@ -116,9 +117,9 @@ PYBIND11_MODULE(cuda_beam_search, m) {
             
             float* data_ptr = static_cast<float*>(get_tensor_data_ptr(tensor));
             
-            return self.ProcessLogits(data_ptr, batch_size, seq_len, vocab_size);
+            return self.processLogits(data_ptr, batch_size, seq_len, vocab_size);
         })
-        .def("score_next_tokens", &whisper::beam_search::LogitProcessor::ScoreNextTokens)
-        .def("score_and_prune", &whisper::beam_search::LogitProcessor::ScoreAndPrune)
-        .def("set_sampling_params", &whisper::beam_search::LogitProcessor::SetSamplingParams);
+        .def("score_next_tokens", &whisper::beam_search::LogitProcessor::scoreNextTokens)
+        .def("score_and_prune", &whisper::beam_search::LogitProcessor::scoreAndPrune)
+        .def("set_sampling_params", &whisper::beam_search::LogitProcessor::setSamplingParams);
 } 

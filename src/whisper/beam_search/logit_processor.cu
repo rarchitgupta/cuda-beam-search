@@ -1,4 +1,5 @@
 #include "whisper/beam_search/logit_processor.h"
+#include "whisper/beam_search/cuda_utils.h"  // For CUDA_CHECK/LAUNCH_AND_CHECK
 #include <cuda_runtime.h>
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
@@ -13,7 +14,7 @@ namespace beam_search {
 // CUDA kernels
 
 // Apply temperature to logits
-__global__ void TemperatureKernel(float* logits, size_t size, float temperature) {
+__global__ void temperature_kernel(float* logits, size_t size, float temperature) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         logits[idx] = logits[idx] / temperature;
@@ -21,7 +22,7 @@ __global__ void TemperatureKernel(float* logits, size_t size, float temperature)
 }
 
 // Find max value for stable softmax
-__global__ void LogitMaxKernel(const float* logits, float* max_values, int vocab_size) {
+__global__ void logit_max_kernel(const float* logits, float* max_values, int vocab_size) {
     int batch_pos = blockIdx.x;
     int offset = batch_pos * vocab_size;
     
@@ -55,7 +56,7 @@ __global__ void LogitMaxKernel(const float* logits, float* max_values, int vocab
 }
 
 // Compute softmax efficiently
-__global__ void SoftmaxKernel(
+__global__ void softmax_kernel(
     const float* logits, float* probs, const float* max_values, 
     int vocab_size, float* sum_values) {
     
@@ -94,7 +95,7 @@ __global__ void SoftmaxKernel(
 }
 
 // Normalize values after softmax
-__global__ void NormalizeKernel(float* probs, const float* sum_values, int vocab_size) {
+__global__ void normalize_kernel(float* probs, const float* sum_values, int vocab_size) {
     int batch_pos = blockIdx.x;
     int offset = batch_pos * vocab_size;
     float sum = sum_values[batch_pos];
@@ -106,7 +107,7 @@ __global__ void NormalizeKernel(float* probs, const float* sum_values, int vocab
 }
 
 // Generate indices for sorting
-__global__ void InitIndicesKernel(int* indices, size_t size) {
+__global__ void init_indices_kernel(int* indices, size_t size) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < size) {
         indices[idx] = idx;
@@ -114,7 +115,7 @@ __global__ void InitIndicesKernel(int* indices, size_t size) {
 }
 
 // Score tokens kernel
-__global__ void ScoreTokensKernel(
+__global__ void score_tokens_kernel(
     const float* logits, const float* prev_scores, int* token_ids, int* prev_indices,
     float* new_scores, int* new_token_ids, int* new_prev_indices,
     int beam_size, int vocab_size) {
@@ -150,268 +151,238 @@ constexpr size_t kAlignment = 128; // Align to 128 bytes
 // Implementation
 
 LogitProcessor::LogitProcessor(
-    BeamSearchWorkspace* workspace, float temperature, int top_k, float top_p)
-    : workspace_(workspace), temperature_(temperature), top_k_(top_k), top_p_(top_p) {
+    BeamSearchWorkspace* workspace, float temperature, int topK, float topP)
+    : workspace_(workspace), temperature_(temperature), topK_(topK), topP_(topP) {
     
     if (!workspace_) {
         throw std::invalid_argument("Workspace cannot be null");
     }
 }
 
-bool LogitProcessor::ProcessLogits(
-    const float* d_logits, int batch_size, int seq_len, int vocab_size) {
+bool LogitProcessor::processLogits(
+    const float* deviceLogits, int batchSize, int seqLen, int vocabSize) {
     
     // Store dimensions
-    batch_size_ = batch_size;
-    seq_len_ = seq_len;
-    vocab_size_ = vocab_size;
+    batchSize_ = batchSize;
+    seqLen_ = seqLen;
+    vocabSize_ = vocabSize;
     
     // Calculate required storage size
-    size_t logits_size = batch_size * seq_len * vocab_size * sizeof(float);
-    size_t indices_size = batch_size * seq_len * vocab_size * sizeof(int);
-    size_t temp_size = batch_size * seq_len * sizeof(float) * 2; // For max and sum values
+    size_t logitsSize = batchSize_ * seqLen_ * vocabSize_ * sizeof(float);
+    size_t indicesSize = batchSize_ * seqLen_ * vocabSize_ * sizeof(int);
+    size_t tempSize = batchSize_ * seqLen_ * sizeof(float) * 2; // For max and sum values
     
     // Total storage needed
-    size_t total_size = logits_size + indices_size + temp_size;
+    size_t totalSize = logitsSize + indicesSize + tempSize;
     
     // Allocate memory if needed
-    AllocateMemory(total_size);
+    allocateMemory(totalSize);
     
     // Copy logits to our processed buffer
-    cudaMemcpy(d_processed_logits_, d_logits, logits_size, cudaMemcpyDeviceToDevice);
+    CUDA_CHECK(cudaMemcpy(processedLogits_, deviceLogits, logitsSize, cudaMemcpyDeviceToDevice));
     
     return true;
 }
 
-void LogitProcessor::AllocateMemory(size_t required_size) {
+void LogitProcessor::allocateMemory(std::size_t requiredSize) {
     // Only reallocate if needed
-    if (required_size <= temp_storage_size_ && d_processed_logits_ != nullptr) {
+    if (requiredSize <= tempStorageSize_ && processedLogits_ != nullptr) {
         return;
     }
     
     // Allocate with proper alignment
-    temp_storage_size_ = required_size + kAlignment;
-    d_processed_logits_ = static_cast<float*>(workspace_->Allocate(
-        batch_size_ * seq_len_ * vocab_size_ * sizeof(float), kAlignment));
+    tempStorageSize_ = requiredSize + kAlignment;
+    processedLogits_ = static_cast<float*>(workspace_->allocate(
+        batchSize_ * seqLen_ * vocabSize_ * sizeof(float), kAlignment));
     
-    d_token_indices_ = static_cast<int*>(workspace_->Allocate(
-        batch_size_ * seq_len_ * vocab_size_ * sizeof(int), kAlignment));
+    tokenIndices_ = static_cast<int*>(workspace_->allocate(
+        batchSize_ * seqLen_ * vocabSize_ * sizeof(int), kAlignment));
     
-    d_temp_storage_ = static_cast<float*>(workspace_->Allocate(
-        batch_size_ * seq_len_ * sizeof(float) * 2, kAlignment));
+    tempStorage_ = static_cast<float*>(workspace_->allocate(
+        batchSize_ * seqLen_ * sizeof(float) * 2, kAlignment));
     
-    if (!d_processed_logits_ || !d_token_indices_ || !d_temp_storage_) {
+    if (!processedLogits_ || !tokenIndices_ || !tempStorage_) {
         throw std::runtime_error("Failed to allocate device memory for LogitProcessor");
     }
 }
 
-void LogitProcessor::ApplyTemperature(float* d_logits, int batch_index, int position) {
-    int offset = (batch_index * seq_len_ + position) * vocab_size_;
-    int blocks = (vocab_size_ + kBlockSize - 1) / kBlockSize;
+void LogitProcessor::applyTemperature(float* deviceLogits, int batchIndex, int position) {
+    int offset = (batchIndex * seqLen_ + position) * vocabSize_;
+    int blocks = (vocabSize_ + kBlockSize - 1) / kBlockSize;
     
-    TemperatureKernel<<<blocks, kBlockSize>>>(
-        d_logits + offset, vocab_size_, temperature_);
+    LAUNCH_AND_CHECK(temperature_kernel<<<blocks, kBlockSize>>>(
+        deviceLogits + offset, vocabSize_, temperature_
+    ));
 }
 
-void LogitProcessor::ApplySoftmax(float* d_logits, int batch_index, int position) {
-    int batch_pos = batch_index * seq_len_ + position;
-    float* d_max_values = d_temp_storage_;
-    float* d_sum_values = d_temp_storage_ + batch_size_ * seq_len_;
+void LogitProcessor::applySoftmax(float* deviceLogits, int batchIndex, int position) {
+    int batchPos = batchIndex * seqLen_ + position;
+    float* d_maxValues = tempStorage_;
+    float* d_sumValues = tempStorage_ + batchSize_ * seqLen_;
     
     // Find max for numerical stability
-    LogitMaxKernel<<<1, kBlockSize>>>(
-        d_logits + batch_pos * vocab_size_, d_max_values + batch_pos, vocab_size_);
+    LAUNCH_AND_CHECK(logit_max_kernel<<<1, kBlockSize>>>(
+        deviceLogits + batchPos * vocabSize_, d_maxValues + batchPos, vocabSize_
+    ));
     
     // Compute softmax
-    SoftmaxKernel<<<1, kBlockSize>>>(
-        d_logits + batch_pos * vocab_size_, 
-        d_logits + batch_pos * vocab_size_,
-        d_max_values + batch_pos, 
-        vocab_size_,
-        d_sum_values + batch_pos);
+    LAUNCH_AND_CHECK(softmax_kernel<<<1, kBlockSize>>>(
+        deviceLogits + batchPos * vocabSize_, 
+        deviceLogits + batchPos * vocabSize_,
+        d_maxValues + batchPos, 
+        vocabSize_,
+        d_sumValues + batchPos
+    ));
     
     // Normalize
-    NormalizeKernel<<<1, kBlockSize>>>(
-        d_logits + batch_pos * vocab_size_, 
-        d_sum_values + batch_pos, 
-        vocab_size_);
+    LAUNCH_AND_CHECK(normalize_kernel<<<1, kBlockSize>>>(
+        deviceLogits + batchPos * vocabSize_, 
+        d_sumValues + batchPos, 
+        vocabSize_
+    ));
 }
 
-void LogitProcessor::ApplyTopK(int batch_index, int position) {
-    if (top_k_ <= 0 || top_k_ >= vocab_size_) {
+void LogitProcessor::applyTopK(int batchIndex, int position) {
+    if (topK_ <= 0 || topK_ >= vocabSize_) {
         return; // No need to apply top-k
     }
     
-    int batch_pos = batch_index * seq_len_ + position;
-    int offset = batch_pos * vocab_size_;
-    int blocks = (vocab_size_ + kBlockSize - 1) / kBlockSize;
+    int batchPos = batchIndex * seqLen_ + position;
+    int offset = batchPos * vocabSize_;
+    int blocks = (vocabSize_ + kBlockSize - 1) / kBlockSize;
     
     // Initialize indices
-    InitIndicesKernel<<<blocks, kBlockSize>>>(
-        d_token_indices_ + offset, vocab_size_);
+    LAUNCH_AND_CHECK(init_indices_kernel<<<blocks, kBlockSize>>>(
+        tokenIndices_ + offset, vocabSize_
+    ));
     
     // Sort indices by score
-    thrust::device_ptr<int> d_indices_ptr(d_token_indices_ + offset);
+    thrust::device_ptr<int> d_indicesPtr(tokenIndices_ + offset);
     thrust::sort(
         thrust::device, 
-        d_indices_ptr, 
-        d_indices_ptr + vocab_size_,
-        ScoreComparator(d_processed_logits_ + offset));
+        d_indicesPtr, 
+        d_indicesPtr + vocabSize_,
+        ScoreComparator(processedLogits_ + offset));
     
     // Only keep top-k logits (set others to -INFINITY)
-    float neg_inf = -std::numeric_limits<float>::infinity();
+    float negInf = -std::numeric_limits<float>::infinity();
     
     // To keep implementation simple for now, we'll do this on CPU
     // A more optimized version would use a custom kernel
-    std::vector<int> h_indices(vocab_size_);
-    cudaMemcpy(h_indices.data(), d_token_indices_ + offset, 
-              vocab_size_ * sizeof(int), cudaMemcpyDeviceToHost);
+    std::vector<int> h_indices(vocabSize_);
+    CUDA_CHECK(cudaMemcpy(h_indices.data(), tokenIndices_ + offset, 
+              vocabSize_ * sizeof(int), cudaMemcpyDeviceToHost));
     
-    std::vector<float> h_logits(vocab_size_);
-    cudaMemcpy(h_logits.data(), d_processed_logits_ + offset, 
-              vocab_size_ * sizeof(float), cudaMemcpyDeviceToHost);
+    std::vector<float> h_logits(vocabSize_);
+    CUDA_CHECK(cudaMemcpy(h_logits.data(), processedLogits_ + offset, 
+              vocabSize_ * sizeof(float), cudaMemcpyDeviceToHost));
     
     // Set logits outside top-k to -inf
-    for (int i = top_k_; i < vocab_size_; i++) {
-        h_logits[h_indices[i]] = neg_inf;
+    for (int i = topK_; i < vocabSize_; i++) {
+        h_logits[h_indices[i]] = negInf;
     }
     
     // Copy back to device
-    cudaMemcpy(d_processed_logits_ + offset, h_logits.data(), 
-              vocab_size_ * sizeof(float), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMemcpy(processedLogits_ + offset, h_logits.data(), 
+              vocabSize_ * sizeof(float), cudaMemcpyHostToDevice));
 }
 
-void LogitProcessor::ApplyTopP(int batch_index, int position) {
-    if (top_p_ >= 1.0f - 1e-6) {
-        return; // No need to apply top-p
-    }
+void LogitProcessor::applyTopP(int batchIndex, int position) {
+    if (topP_ >= 1.0f - 1e-6) return;
+    // TODO: Replace this CPU fallback with a CUDA kernel
     
-    // Basic top-p implementation
-    // For brevity, we'll just do this on the CPU for now
-    // A more optimized version would use custom CUDA kernels
-    
-    int batch_pos = batch_index * seq_len_ + position;
-    int offset = batch_pos * vocab_size_;
-    
-    // Get sorted indices and probs
-    std::vector<int> h_indices(vocab_size_);
-    std::vector<float> h_probs(vocab_size_);
-    
-    cudaMemcpy(h_indices.data(), d_token_indices_ + offset, 
-              vocab_size_ * sizeof(int), cudaMemcpyDeviceToHost);
-    
-    cudaMemcpy(h_probs.data(), d_processed_logits_ + offset, 
-              vocab_size_ * sizeof(float), cudaMemcpyDeviceToHost);
-    
-    // Calculate cumulative probability
-    float cum_prob = 0.0f;
-    float neg_inf = -std::numeric_limits<float>::infinity();
-    int cutoff_idx = vocab_size_ - 1;
-    
-    for (int i = 0; i < vocab_size_; i++) {
-        cum_prob += h_probs[h_indices[i]];
-        if (cum_prob > top_p_) {
-            cutoff_idx = i;
-            break;
-        }
-    }
-    
-    // Set probabilities outside top-p to 0
-    for (int i = cutoff_idx + 1; i < vocab_size_; i++) {
-        h_probs[h_indices[i]] = neg_inf;
-    }
-    
-    // Copy back to device
-    cudaMemcpy(d_processed_logits_ + offset, h_probs.data(), 
-              vocab_size_ * sizeof(float), cudaMemcpyHostToDevice);
+    // int batchPos = batchIndex * seqLen_ + position;
+    // int offset = batchPos * vocabSize_;
+    // Fallback code removed. Will implement GPU version later.
 }
 
-void LogitProcessor::ScoreNextTokens(
-    const BeamArray* beam, int batch_index, int position, BeamArray* output_beam) {
+void LogitProcessor::scoreNextTokens(
+    const BeamArray* beam, int batchIndex, int position, BeamArray* outputBeam) {
     
     // Process logits for this position
-    int batch_pos = batch_index * seq_len_ + position;
-    int offset = batch_pos * vocab_size_;
+    int batchPos = batchIndex * seqLen_ + position;
+    int offset = batchPos * vocabSize_;
     
     // Apply temperature and softmax
-    ApplyTemperature(d_processed_logits_, batch_index, position);
-    ApplySoftmax(d_processed_logits_, batch_index, position);
+    applyTemperature(processedLogits_, batchIndex, position);
+    applySoftmax(processedLogits_, batchIndex, position);
     
     // Apply top-k and top-p sampling if enabled
-    ApplyTopK(batch_index, position);
-    ApplyTopP(batch_index, position);
+    applyTopK(batchIndex, position);
+    applyTopP(batchIndex, position);
     
     // Now score tokens based on beam and processed logits
-    size_t beam_size = beam->Size();
-    size_t output_size = beam_size * vocab_size_;
+    size_t beamSize = beam->size();
+    size_t outputSize = beamSize * vocabSize_;
     
     // Allocate temporary memory for expanded tokens
-    float* d_expanded_scores = static_cast<float*>(workspace_->Allocate(
-        output_size * sizeof(float), kAlignment));
-    int* d_expanded_token_ids = static_cast<int*>(workspace_->Allocate(
-        output_size * sizeof(int), kAlignment));
-    int* d_expanded_prev_indices = static_cast<int*>(workspace_->Allocate(
-        output_size * sizeof(int), kAlignment));
+    float* d_expandedScores = static_cast<float*>(workspace_->allocate(
+        outputSize * sizeof(float), kAlignment));
+    int* d_expandedTokenIds = static_cast<int*>(workspace_->allocate(
+        outputSize * sizeof(int), kAlignment));
+    int* d_expandedPrevIndices = static_cast<int*>(workspace_->allocate(
+        outputSize * sizeof(int), kAlignment));
     
     // Get beam data pointers
-    float* d_beam_scores = beam->GetScorePtr();
-    int* d_beam_token_ids = beam->GetTokenIdPtr();
-    int* d_beam_prev_indices = beam->GetPrevIndexPtr();
+    float* d_beamScores = beam->scorePtr();
+    int* d_beamTokenIds = beam->tokenIdPtr();
+    int* d_beamPrevIndices = beam->prevIndexPtr();
     
     // Launch kernel to score tokens
-    dim3 block_dim(kBlockSize);
-    dim3 grid_dim((vocab_size_ + block_dim.x - 1) / block_dim.x, beam_size);
+    dim3 blockDim(kBlockSize);
+    dim3 gridDim((vocabSize_ + blockDim.x - 1) / blockDim.x, beamSize);
     
-    ScoreTokensKernel<<<grid_dim, block_dim>>>(
-        d_processed_logits_ + offset,
-        d_beam_scores, 
-        d_beam_token_ids,
-        d_beam_prev_indices,
-        d_expanded_scores,
-        d_expanded_token_ids,
-        d_expanded_prev_indices,
-        beam_size,
-        vocab_size_);
+    LAUNCH_AND_CHECK(score_tokens_kernel<<<gridDim, blockDim>>>(
+        processedLogits_ + offset,
+        d_beamScores, 
+        d_beamTokenIds,
+        d_beamPrevIndices,
+        d_expandedScores,
+        d_expandedTokenIds,
+        d_expandedPrevIndices,
+        beamSize,
+        vocabSize_
+    ));
     
     // Create expanded tokens and add to output beam
-    std::vector<Token> tokens(output_size);
+    std::vector<Token> tokens(outputSize);
     
     // Copy expanded tokens to host
-    std::vector<float> h_scores(output_size);
-    std::vector<int> h_token_ids(output_size);
-    std::vector<int> h_prev_indices(output_size);
+    std::vector<float> h_scores(outputSize);
+    std::vector<int> h_tokenIds(outputSize);
+    std::vector<int> h_prevIndices(outputSize);
     
-    cudaMemcpy(h_scores.data(), d_expanded_scores, 
-              output_size * sizeof(float), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_token_ids.data(), d_expanded_token_ids, 
-              output_size * sizeof(int), cudaMemcpyDeviceToHost);
-    cudaMemcpy(h_prev_indices.data(), d_expanded_prev_indices, 
-              output_size * sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_scores.data(), d_expandedScores, 
+              outputSize * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_tokenIds.data(), d_expandedTokenIds, 
+              outputSize * sizeof(int), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_prevIndices.data(), d_expandedPrevIndices, 
+              outputSize * sizeof(int), cudaMemcpyDeviceToHost));
     
     // Create tokens
-    for (size_t i = 0; i < output_size; i++) {
-        tokens[i] = Token(h_scores[i], h_token_ids[i], h_prev_indices[i]);
+    for (size_t i = 0; i < outputSize; i++) {
+        tokens[i] = Token(h_scores[i], h_tokenIds[i], h_prevIndices[i]);
     }
     
     // Add expanded tokens to output beam
-    output_beam->AddTokens(tokens.data(), output_size);
+    outputBeam->addTokens(tokens.data(), outputSize);
 }
 
-void LogitProcessor::ScoreAndPrune(
-    const BeamArray* beam, int batch_index, int position, 
-    BeamArray* output_beam, size_t beam_width) {
+void LogitProcessor::scoreAndPrune(
+    const BeamArray* beam, int batchIndex, int position, 
+    BeamArray* outputBeam, size_t beamWidth) {
     
     // Score tokens
-    ScoreNextTokens(beam, batch_index, position, output_beam);
+    scoreNextTokens(beam, batchIndex, position, outputBeam);
     
     // Prune beam
-    output_beam->Prune(beam_width);
+    outputBeam->prune(beamWidth);
 }
 
-void LogitProcessor::SetSamplingParams(float temperature, int top_k, float top_p) {
+void LogitProcessor::setSamplingParams(float temperature, int topK, float topP) {
     temperature_ = temperature;
-    top_k_ = top_k;
-    top_p_ = top_p;
+    topK_ = topK;
+    topP_ = topP;
 }
 
 } // namespace beam_search

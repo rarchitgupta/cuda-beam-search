@@ -1,43 +1,59 @@
 #pragma once
 
+#ifndef __host__
+#define __host__
+#endif
+#ifndef __device__
+#define __device__
+#endif
+
+#include <cstddef>
 #include <cstdint>
-#include <vector>
-#include <cuda_runtime.h>
 
 namespace whisper {
 namespace beam_search {
 
+// Holds a token with its score and history pointer for beam search.
 struct Token {
     float score;         // Cumulative log probability
-    int32_t token_id;    
-    int32_t prev_index;  // Index to previous token for history tracking
+    int32_t tokenId;     // Token identifier
+    int32_t prevIndex;   // Index of previous token for history tracking
     
-    __host__ __device__ Token() : score(0.0f), token_id(0), prev_index(-1) {}
+    __host__ __device__ Token() : score(0.0f), tokenId(0), prevIndex(-1) {}
     
     __host__ __device__ Token(float s, int32_t t, int32_t p) 
-        : score(s), token_id(t), prev_index(p) {}
+        : score(s), tokenId(t), prevIndex(p) {}
 };
 
-// Memory manager that avoids repeated GPU memory allocations
+// Workspace for GPU memory allocations used in beam search.
 class BeamSearchWorkspace {
 public:
-    BeamSearchWorkspace(size_t initial_size = 16 * 1024 * 1024);
+    // Constructs a workspace with initial capacity in bytes.
+    explicit BeamSearchWorkspace(std::size_t initialSize = 16 * 1024 * 1024);
     
     ~BeamSearchWorkspace();
     
-    void* Allocate(size_t size, size_t alignment = 256);
+    // Allocates 'size' bytes with specified alignment; returns device pointer.
+    void* allocate(std::size_t size, std::size_t alignment = 256);
     
-    void Reset();
+    // Resets the workspace, freeing previous allocations.
+    void reset();
     
-    size_t GetUsedSize() const;
+    // Returns number of bytes currently allocated.
+    std::size_t usedSize() const;
     
-    size_t GetCapacity() const;
+    // Returns current capacity in bytes.
+    std::size_t capacity() const;
     
 private:
-    void* d_memory_;
-    size_t capacity_;
-    size_t used_;
+    // Pointer to device memory buffer.
+    void* deviceMemory_;
+    // Total capacity of the buffer.
+    std::size_t capacity_;
+    // Bytes used so far.
+    std::size_t usedSize_;
     
+    // Non-copyable.
     BeamSearchWorkspace(const BeamSearchWorkspace&) = delete;
     BeamSearchWorkspace& operator=(const BeamSearchWorkspace&) = delete;
 };

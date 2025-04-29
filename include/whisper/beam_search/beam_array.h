@@ -1,65 +1,79 @@
 #pragma once
 
-#include "whisper/beam_search/beam_types.h"
-#include <cuda_runtime.h>
+#include <cstddef>
 #include <vector>
-#include <memory>
+
+#include "whisper/beam_search/beam_types.h"
 
 namespace whisper {
 namespace beam_search {
 
-// Manages beam tokens using Structure of Arrays (SoA) pattern for efficient GPU memory access
+// Manages beam tokens using Structure of Arrays (SoA) pattern for efficient GPU memory access.
 class BeamArray {
 public:
-    BeamArray(size_t max_beam_size, BeamSearchWorkspace* workspace);
+    // Constructs a BeamArray with the given maximum beam size and workspace.
+    BeamArray(std::size_t maxBeamSize, BeamSearchWorkspace* workspace);
 
     ~BeamArray();
 
-    void Reset();
+    // Resets the array to an empty state.
+    void reset();
 
-    size_t Size() const { return size_; }
+    // Returns the current number of tokens.
+    std::size_t size() const;
 
-    size_t Capacity() const { return capacity_; }
+    // Returns the capacity (maximum beam size).
+    std::size_t capacity() const;
 
-    int AddToken(const Token& token);
+    // Adds a single token; returns its index or -1 on failure.
+    int addToken(const Token& token);
 
-    int AddTokens(const Token* tokens, size_t count);
+    // Adds multiple tokens; returns the number actually added.
+    int addTokens(const Token* tokens, std::size_t count);
 
-    void SortByScore();
+    // Sorts tokens by descending score.
+    void sortByScore();
 
-    // Keep only top beam_width tokens with highest scores
-    void Prune(size_t beam_width);
+    // Keeps only the top 'beamWidth' tokens by score.
+    void prune(std::size_t beamWidth);
 
-    Token GetToken(size_t index) const;
+    // Retrieves the token at the given index.
+    Token getToken(std::size_t index) const;
 
-    void CopyToHost(std::vector<Token>& host_tokens) const;
+    // Copies tokens to the provided host vector.
+    void copyToHost(std::vector<Token>& hostTokens) const;
 
-    float* GetScorePtr() const { return d_scores_; }
-
-    int* GetTokenIdPtr() const { return d_token_ids_; }
-
-    int* GetPrevIndexPtr() const { return d_prev_indices_; }
+    // Device pointers for direct access.
+    float* scorePtr() const { return deviceScores_; }
+    int* tokenIdPtr() const { return deviceTokenIds_; }
+    int* prevIndexPtr() const { return devicePrevIndices_; }
 
 private:
-    // Device memory in SoA layout
-    float* d_scores_ = nullptr;
-    int* d_token_ids_ = nullptr;
-    int* d_prev_indices_ = nullptr;
-    int* d_indices_ = nullptr;
+    // Ensures there is capacity for the required number of tokens.
+    void ensureCapacity(std::size_t requiredSize);
 
-    // Host shadow copies for quick access
-    std::vector<float> h_scores_;
-    std::vector<int> h_token_ids_;
-    std::vector<int> h_prev_indices_;
+    // Allocates device memory.
+    void allocateMemory();
 
-    size_t capacity_ = 0;
-    size_t size_ = 0;
-    
+    // Copies raw arrays to host vectors.
+    void copyToHost(std::vector<float>& scores,
+                    std::vector<int>& tokenIds,
+                    std::vector<int>& prevIndices);
+
+    // Device memory in SoA layout.
+    float* deviceScores_ = nullptr;
+    int* deviceTokenIds_ = nullptr;
+    int* devicePrevIndices_ = nullptr;
+    int* deviceIndices_ = nullptr;
+
+    // Host shadow copies for quick access.
+    std::vector<float> hostScores_;
+    std::vector<int> hostTokenIds_;
+    std::vector<int> hostPrevIndices_;
+
+    std::size_t capacity_ = 0;
+    std::size_t size_ = 0;
     BeamSearchWorkspace* workspace_ = nullptr;
-
-    void EnsureCapacity(size_t required_size);
-    void AllocateMemory();
-    void CopyToHost(std::vector<float>& scores, std::vector<int>& token_ids, std::vector<int>& prev_indices);
 };
 
 } // namespace beam_search
