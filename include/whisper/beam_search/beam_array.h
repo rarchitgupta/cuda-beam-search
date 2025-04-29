@@ -48,6 +48,15 @@ public:
     int* tokenIdPtr() const { return deviceTokenIds_; }
     int* prevIndexPtr() const { return devicePrevIndices_; }
 
+    // --- GPU-based history reconstruction ---
+    // Allocates device history buffers for up to maxSteps steps and beamWidth beams.
+    void allocateHistory(std::size_t maxSteps, std::size_t beamWidth);
+    // Records the current step's backpointers and tokenIds to device history.
+    void recordHistoryStep(std::size_t beamWidth);
+    // Reconstructs the best path for each beam on the GPU and copies to host.
+    // hostOutput: shape [beamWidth][stepCount+1], row-major.
+    void reconstructHistory(int* hostOutput, std::size_t beamWidth, std::size_t stepCount);
+
 private:
     // Ensures there is capacity for the required number of tokens.
     void ensureCapacity(std::size_t requiredSize);
@@ -65,6 +74,12 @@ private:
     int* deviceTokenIds_ = nullptr;
     int* devicePrevIndices_ = nullptr;
     int* deviceIndices_ = nullptr;
+
+    // Device-side history tracking
+    int* d_historyPrevIndices_ = nullptr; // [maxSteps * beamWidth]
+    int* d_historyTokenIds_ = nullptr;    // [maxSteps * beamWidth]
+    std::size_t maxHistorySteps_ = 0;
+    std::size_t historyStep_ = 0;
 
     // Host shadow copies for quick access.
     std::vector<float> hostScores_;

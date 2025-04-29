@@ -4,6 +4,7 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <cuda_runtime.h>
 
 using namespace whisper::beam_search;
 
@@ -130,6 +131,50 @@ void test_beam_array_capacity() {
     std::cout << "Capacity growth tests passed!" << std::endl;
 }
 
+void test_beam_array_history_reconstruct() {
+    BeamSearchWorkspace workspace(1024 * 1024);
+    constexpr int beamWidth = 3;
+    constexpr int steps = 4;
+    BeamArray beam(beamWidth, &workspace);
+    beam.allocateHistory(steps + 1, beamWidth);
+
+    // Simulate a simple beam search with known prevIndices and tokenIds
+    // For each step, fill devicePrevIndices_ and deviceTokenIds_ with known values
+    std::vector<int> prevs = { -1, 0, 1, 2, 1, 0, 2, 1, 0, 2, 1, 0 };
+    std::vector<int> tokens = { 10, 11, 12, 20, 21, 22, 30, 31, 32, 40, 41, 42 };
+    // Ensure prevs and tokens are sized for (steps+1)*beamWidth
+    prevs.resize((steps + 1) * beamWidth);
+    tokens.resize((steps + 1) * beamWidth);
+    // Set last step's values to valid, meaningful values
+    prevs[12] = 0; prevs[13] = 1; prevs[14] = 2;
+    tokens[12] = 100; tokens[13] = 110; tokens[14] = 161;
+    for (int s = 0; s < steps; ++s) {
+        cudaMemcpy(beam.prevIndexPtr(), prevs.data() + s * beamWidth, beamWidth * sizeof(int), cudaMemcpyHostToDevice);
+        cudaMemcpy(beam.tokenIdPtr(), tokens.data() + s * beamWidth, beamWidth * sizeof(int), cudaMemcpyHostToDevice);
+        beam.recordHistoryStep(beamWidth);
+    }
+    // Last step
+    cudaMemcpy(beam.prevIndexPtr(), prevs.data() + steps * beamWidth, beamWidth * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(beam.tokenIdPtr(), tokens.data() + steps * beamWidth, beamWidth * sizeof(int), cudaMemcpyHostToDevice);
+    beam.recordHistoryStep(beamWidth);
+
+    // Reconstruct
+    std::vector<int> out(beamWidth * (steps + 1));
+    beam.reconstructHistory(out.data(), beamWidth, steps);
+
+    // CPU reference: reconstruct for each beam
+    for (int b = 0; b < beamWidth; ++b) {
+        int idx = b;
+        for (int s = steps; s >= 0; --s) {
+            int token = tokens[s * beamWidth + idx];
+            assert(out[b * (steps + 1) + s] == token);
+            idx = prevs[s * beamWidth + idx];
+            if (idx < 0) break;
+        }
+    }
+    std::cout << "BeamArray GPU history reconstruction test passed!" << std::endl;
+}
+
 int main() {
     try {
         test_beam_array_basic();
@@ -137,7 +182,7 @@ int main() {
         test_beam_array_sort_prune();
         test_beam_array_copy_to_host();
         test_beam_array_capacity();
-        
+        test_beam_array_history_reconstruct();
         std::cout << "All BeamArray tests passed!" << std::endl;
         return 0;
     } catch (const std::exception& e) {

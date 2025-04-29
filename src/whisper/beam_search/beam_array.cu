@@ -1,10 +1,13 @@
 #include "whisper/beam_search/beam_array.h"
 #include "whisper/beam_search/cuda_utils.h"  // For CUDA_CHECK and LAUNCH_AND_CHECK macros
+#include "whisper/beam_search/prune_kernel.h"
+#include "whisper/beam_search/history_reconstruct.h"
 #include <thrust/sort.h>
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>
 #include <algorithm>
 #include <stdexcept>
+#include <cuda_runtime.h>
 
 namespace whisper {
 namespace beam_search {
@@ -269,17 +272,28 @@ void BeamArray::prune(std::size_t beamWidth) {
     if (size_ <= beamWidth) {
         return;  // No pruning needed
     }
-    
-    // Sort first to ensure we keep the best tokens
-    sortByScore();
-    
-    // Truncate to beam width
+
+    // Generate indices for sorting
+    int blocks = (size_ + kBlockSize - 1) / kBlockSize;
+    LAUNCH_AND_CHECK(generate_indices_kernel<<<blocks, kBlockSize>>>(
+        deviceIndices_, size_
+    ));
+
+    // Sort indices by score (descending)
+    thrust::device_ptr<int> deviceIndicesPtr(deviceIndices_);
+    thrust::sort(thrust::device, deviceIndicesPtr, deviceIndicesPtr + size_,
+                 TokenScoreComparator(deviceScores_));
+
+    // Use CUB-based GPU-native prune for single-beam
+    launchPruneKernel(
+        deviceScores_, deviceTokenIds_, devicePrevIndices_,
+        /*beamCount=*/1, /*candidateCount=*/int(size_), /*beamWidth=*/int(beamWidth),
+        /*stream=*/0);
+
     size_ = beamWidth;
-    
-    // Truncate host shadow copies
-    hostScores_.resize(size_);
-    hostTokenIds_.resize(size_);
-    hostPrevIndices_.resize(size_);
+
+    // Update host shadow copies
+    copyToHost(hostScores_, hostTokenIds_, hostPrevIndices_);
 }
 
 Token BeamArray::getToken(std::size_t index) const {
@@ -335,6 +349,32 @@ void BeamArray::copyToHost(std::vector<float>& scores, std::vector<int>& tokenId
     CUDA_CHECK(cudaMemcpy(scores.data(), deviceScores_, size_ * sizeof(float), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(tokenIds.data(), deviceTokenIds_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaMemcpy(prevIndices.data(), devicePrevIndices_, size_ * sizeof(int), cudaMemcpyDeviceToHost));
+}
+
+void BeamArray::allocateHistory(std::size_t maxSteps, std::size_t beamWidth) {
+    if (d_historyPrevIndices_) cudaFree(d_historyPrevIndices_);
+    if (d_historyTokenIds_) cudaFree(d_historyTokenIds_);
+    cudaMalloc(&d_historyPrevIndices_, maxSteps * beamWidth * sizeof(int));
+    cudaMalloc(&d_historyTokenIds_,    maxSteps * beamWidth * sizeof(int));
+    maxHistorySteps_ = maxSteps;
+    historyStep_ = 0;
+}
+
+void BeamArray::recordHistoryStep(std::size_t beamWidth) {
+    if (!d_historyPrevIndices_ || !d_historyTokenIds_ || historyStep_ >= maxHistorySteps_) return;
+    cudaMemcpy(d_historyPrevIndices_ + historyStep_ * beamWidth, devicePrevIndices_, beamWidth * sizeof(int), cudaMemcpyDeviceToDevice);
+    cudaMemcpy(d_historyTokenIds_ + historyStep_ * beamWidth, deviceTokenIds_, beamWidth * sizeof(int), cudaMemcpyDeviceToDevice);
+    ++historyStep_;
+}
+
+void BeamArray::reconstructHistory(int* hostOutput, std::size_t beamWidth, std::size_t stepCount) {
+    int* d_outputSequences = nullptr;
+    cudaMalloc(&d_outputSequences, beamWidth * (stepCount + 1) * sizeof(int));
+    launchReconstructKernel(
+        d_historyPrevIndices_, d_historyTokenIds_,
+        beamWidth, stepCount, d_outputSequences, 0);
+    cudaMemcpy(hostOutput, d_outputSequences, beamWidth * (stepCount + 1) * sizeof(int), cudaMemcpyDeviceToHost);
+    cudaFree(d_outputSequences);
 }
 
 } // namespace beam_search
